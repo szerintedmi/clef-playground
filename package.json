@@ -1,0 +1,27 @@
+{
+  "name": "clef-test",
+  "module": "src/server.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "dependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "scripts": {
+    "dev": "bun --hot src/server.ts",
+    "start": "NODE_ENV=production bun src/server.ts",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit",
+    "db:migrate": "bun src/migrate.ts up",
+    "db:status": "bun src/migrate.ts status",
+    "db:new": "bun src/migrate.ts new"
+  }
+}
