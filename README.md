@@ -2,7 +2,8 @@
 
 A small local playground for Cloudflare's [Clef](https://developers.cloudflare.com/workers-ai/models/clef/) decision models (`clef` 27B and `clef-flash` 9B).
 
-- Edit the **state** (plain text, or JSON sent as structured data) and attach up to 4 images (drop, paste, or pick)
+- Edit the **state** (plain text, or JSON sent as structured data) and attach up to 4 images (drop, paste, or pick),
+  with a selectable **downscale** (Original … 0.25 MP) applied before sending; each image shows its sent size and estimated tokens
 - Build **questions** (`noul` yes/no, `choice`, `score`) in a form or as raw JSON
 - See answers with per-option probabilities, plus **inference time**, token usage, and **cost**
 - Save/load **question sets** and **inputs**; every run is kept in a **history** you can click to restore — all in a local SQLite file (`data/sqlite/clef.sqlite`)

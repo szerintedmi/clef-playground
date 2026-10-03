@@ -13,24 +13,29 @@ import {
   type SavedInput,
 } from "../shared";
 import {
+  DEFAULT_MAX_PIXELS,
   DEFAULT_QUESTIONS,
+  DOWNSCALE_OPTIONS,
   IMAGE_TYPES,
-  MAX_IMAGE_BYTES,
   MAX_IMAGES,
-  MAX_TOTAL_BYTES,
+  MAX_ORIGINAL_BYTES,
   argmax,
   asText,
   blankDraft,
-  dataUrlBytes,
+  downscaleLabel,
   draftsFromQuestions,
+  fmtBytes,
   fmtMs,
+  fmtTokens,
   fmtUsd,
   pct,
   questionsFromDrafts,
   uid,
   validateDrafts,
+  validateSentImages,
   type QDraft,
 } from "./lib";
+import { prepareImage, type PreparedImage } from "./images";
 
 // ---------- helpers ----------
 
@@ -270,8 +275,21 @@ function App() {
 
   const [stateText, setStateText] = useState("Checkout has been failing for every customer for the last hour.");
   const [stateIsJson, setStateIsJson] = useState(false);
-  const [images, setImages] = useState<string[]>([]);
+  const [images, setImages] = useState<string[]>([]); // originals; downscaled copies are what get sent
   const [imageError, setImageError] = useState("");
+  const [maxPixels, setMaxPixels] = useState<number | null>(() => {
+    try {
+      const v = localStorage.getItem("clef.maxPixels");
+      return v === null ? DEFAULT_MAX_PIXELS : v === "original" ? null : Number(v);
+    } catch {
+      return DEFAULT_MAX_PIXELS;
+    }
+  });
+  const [prepared, setPrepared] = useState<{ images: string[]; maxPixels: number | null; items: PreparedImage[] }>({
+    images: [],
+    maxPixels: null,
+    items: [],
+  });
 
   const [drafts, setDrafts] = useState<QDraft[]>(() => draftsFromQuestions(DEFAULT_QUESTIONS));
   const [rawMode, setRawMode] = useState(false);
@@ -336,23 +354,43 @@ function App() {
         setImageError(`${f.name}: only PNG, JPEG, WebP`);
         continue;
       }
-      if (f.size > MAX_IMAGE_BYTES) {
-        setImageError(`${f.name}: over 4 MiB`);
+      if (f.size > MAX_ORIGINAL_BYTES) {
+        setImageError(`${f.name}: over ${fmtBytes(MAX_ORIGINAL_BYTES)}`);
         continue;
       }
       if (next.length >= MAX_IMAGES) {
         setImageError(`Max ${MAX_IMAGES} images`);
         break;
       }
-      const url = await readAsDataUrl(f);
-      if (next.reduce((s, d) => s + dataUrlBytes(d), 0) + dataUrlBytes(url) > MAX_TOTAL_BYTES) {
-        setImageError("Images over 8 MiB total");
-        break;
-      }
-      next.push(url);
+      next.push(await readAsDataUrl(f));
     }
     setImages(next);
   };
+
+  const changeMaxPixels = (v: number | null) => {
+    setMaxPixels(v);
+    try {
+      localStorage.setItem("clef.maxPixels", v === null ? "original" : String(v));
+    } catch {}
+  };
+
+  // Re-encode whenever the originals or the downscale setting change.
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(images.map((src) => prepareImage(src, maxPixels)))
+      .then((items) => !cancelled && setPrepared({ images, maxPixels, items }))
+      .catch((e) => !cancelled && setImageError(`Could not process image: ${(e as Error).message}`));
+    return () => {
+      cancelled = true;
+    };
+  }, [images, maxPixels]);
+
+  const imagesReady = prepared.images === images && prepared.maxPixels === maxPixels;
+  const sendErrors = useMemo(() => (imagesReady ? validateSentImages(prepared.items) : []), [imagesReady, prepared]);
+  const imageTokens = prepared.items.reduce((s, p) => s + p.tokens, 0);
+  const largestImage = prepared.items
+    .map((p) => ({ width: p.origWidth, height: p.origHeight }))
+    .reduce<{ width: number; height: number } | undefined>((a, b) => (!a || b.width * b.height > a.width * a.height ? b : a), undefined);
 
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
@@ -391,11 +429,12 @@ function App() {
   };
 
   // --- run
-  const canRun = configured && !running && parsedState.ok && validation.length === 0 && !rawMode;
+  const canRun =
+    configured && !running && parsedState.ok && validation.length === 0 && !rawMode && imagesReady && sendErrors.length === 0;
   const run = async () => {
     if (!canRun || !parsedState.ok) return;
     const questions = questionsFromDrafts(drafts);
-    const body: RunRequest = { model, state: parsedState.value, questions, images };
+    const body: RunRequest = { model, state: parsedState.value, questions, images: prepared.items.map((p) => p.url) };
     setRunning(true);
     setResponse(null);
     try {
@@ -444,7 +483,7 @@ function App() {
 
   const result = response?.result;
   const rawRequest = parsedState.ok
-    ? { model, state: parsedState.value, questions: questionsFromDrafts(drafts), ...(images.length ? { images: images.map((_, i) => `<image ${i + 1}>`) } : {}) }
+    ? { model, state: parsedState.value, questions: questionsFromDrafts(drafts), ...(images.length ? { images: prepared.items.map((p, i) => `<image ${i + 1}: ${p.width}×${p.height}, ${fmtBytes(p.bytes)}>`) } : {}) }
     : null;
 
   return (
@@ -515,7 +554,25 @@ function App() {
           <div className="colhead">
             <h2>
               Images <span className="muted">{images.length}/{MAX_IMAGES}</span>
+              {imageTokens > 0 && <span className="muted"> · ~{fmtTokens(imageTokens)} tok</span>}
             </h2>
+            <label
+              className="check"
+              title={`Images larger than this are downscaled (keeping aspect ratio) before sending.${largestImage ? " Resolutions shown are for the largest attached image." : ""}`}
+            >
+              downscale to
+              <select
+                className="inline"
+                value={maxPixels ?? "original"}
+                onChange={(e) => changeMaxPixels(e.target.value === "original" ? null : Number(e.target.value))}
+              >
+                {DOWNSCALE_OPTIONS.map((o) => (
+                  <option key={o.label} value={o.maxPixels ?? "original"}>
+                    {downscaleLabel(o, largestImage)}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <div
             className="drop"
@@ -527,18 +584,35 @@ function App() {
             onClick={() => fileRef.current?.click()}
           >
             {images.length === 0 ? (
-              <span className="muted">Drop, paste, or click to add PNG / JPEG / WebP (max 4, 4 MiB each)</span>
+              <span className="muted">Drop, paste, or click to add up to 4 PNG / JPEG / WebP images</span>
             ) : (
               <div className="thumbs">
-                {images.map((src, i) => (
-                  <div className="thumb" key={i} onClick={(e) => e.stopPropagation()}>
-                    {src ? <img src={src} /> : <span className="muted">n/a</span>}
-                    <span className="mono size">{(dataUrlBytes(src) / 1024).toFixed(0)} KB</span>
-                    <button className="x" onClick={() => setImages(images.filter((_, j) => j !== i))}>
-                      ✕
-                    </button>
-                  </div>
-                ))}
+                {images.map((src, i) => {
+                  const p = imagesReady ? prepared.items[i] : undefined;
+                  const scaled = p && (p.width !== p.origWidth || p.height !== p.origHeight);
+                  return (
+                    <div className="thumbwrap" key={i} onClick={(e) => e.stopPropagation()}>
+                      <div className="thumb">
+                        <img src={src} />
+                        <button className="x" onClick={() => setImages(images.filter((_, j) => j !== i))}>
+                          ✕
+                        </button>
+                      </div>
+                      {p ? (
+                        <div className="mono caption" title={`original ${p.origWidth}×${p.origHeight}, ${fmtBytes(p.origBytes)}`}>
+                          {scaled && <s>{p.origWidth}×{p.origHeight}</s>}
+                          <span>
+                            {p.width}×{p.height}
+                          </span>
+                          <span className="muted">{fmtBytes(p.bytes)}</span>
+                          <span className="muted">~{fmtTokens(p.tokens)} tok</span>
+                        </div>
+                      ) : (
+                        <div className="mono caption muted">processing…</div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
             <input
@@ -554,6 +628,11 @@ function App() {
             />
           </div>
           {imageError && <div className="err">{imageError}</div>}
+          {sendErrors.map((e) => (
+            <div className="err" key={e}>
+              {e}
+            </div>
+          ))}
         </section>
 
         {/* ---------- questions ---------- */}

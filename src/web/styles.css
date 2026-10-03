@@ -65,7 +65,7 @@ main {
 .col:last-child { border-right: 0; }
 .colhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; margin: 0; font-weight: 600; }
-h2 .muted { font-weight: 400; letter-spacing: 0; margin-left: 4px; }
+h2 .muted { font-weight: 400; letter-spacing: 0; margin-left: 4px; text-transform: none; }
 h3 { font-size: 11px; margin: 6px 0 0; color: var(--muted); font-weight: 500; }
 
 input, textarea, select, button {
@@ -115,9 +115,12 @@ ul.err { margin: 0; padding-left: 18px; }
 }
 .drop:hover { border-color: var(--accent); }
 .thumbs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; width: 100%; }
-.thumb { position: relative; aspect-ratio: 1; border-radius: 6px; overflow: hidden; background: var(--panel-2); cursor: default; display: flex; align-items: center; justify-content: center; }
+.thumbwrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; cursor: default; }
+.thumb { position: relative; aspect-ratio: 1; border-radius: 6px; overflow: hidden; background: var(--panel-2); display: flex; align-items: center; justify-content: center; }
 .thumb img { width: 100%; height: 100%; object-fit: cover; }
-.thumb .size { position: absolute; left: 4px; bottom: 3px; font-size: 10px; background: rgba(0,0,0,.55); color: #fff; padding: 0 4px; border-radius: 3px; }
+.caption { display: flex; flex-direction: column; font-size: 10.5px; line-height: 1.3; text-align: left; overflow-wrap: anywhere; }
+.caption s { color: var(--muted); }
+select.inline { width: auto; padding: 2px 4px; font-size: 12px; }
 .thumb .x { position: absolute; top: 3px; right: 3px; padding: 0 5px; font-size: 11px; background: rgba(0,0,0,.55); color: #fff; border: 0; }
 
 /* questions */

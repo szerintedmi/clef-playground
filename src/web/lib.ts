@@ -132,3 +132,88 @@ export const dataUrlBytes = (d: string) => {
   const padding = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
   return Math.floor((b64.length * 3) / 4) - padding;
 };
+
+// ---------- image downscaling ----------
+
+// Clef's image processor (Qwen2VLImageProcessor, from the model's processor_config.json) resizes every image to
+// fit between these pixel counts, in 32×32-pixel blocks (16px patches merged 2×2), one token per block.
+export const MIN_IMAGE_PIXELS = 65_536;
+export const MAX_IMAGE_PIXELS = 16_777_216;
+const TOKEN_BLOCK = 32;
+
+// Originals can be larger than the API limits since they are usually downscaled before sending.
+export const MAX_ORIGINAL_BYTES = 32 * 1024 * 1024;
+
+export const DOWNSCALE_OPTIONS: { label: string; maxPixels: number | null }[] = [
+  { label: "Original", maxPixels: null },
+  { label: "8 MP", maxPixels: 8 * 1024 * 1024 },
+  { label: "4 MP", maxPixels: 4 * 1024 * 1024 },
+  { label: "2 MP", maxPixels: 2 * 1024 * 1024 },
+  { label: "1 MP", maxPixels: 1024 * 1024 },
+  { label: "0.5 MP", maxPixels: 512 * 1024 },
+  { label: "0.25 MP", maxPixels: 256 * 1024 },
+];
+export const DEFAULT_MAX_PIXELS = 1024 * 1024;
+
+/** Largest size with the same aspect ratio that fits in maxPixels. Never upscales. */
+export function fitWithin(width: number, height: number, maxPixels: number | null) {
+  if (maxPixels == null || width * height <= maxPixels) return { width, height };
+  const scale = Math.sqrt(maxPixels / (width * height));
+  const w = Math.floor(width * scale);
+  const h = Math.floor(height * scale);
+  // For extreme aspect ratios one side can round to 0; pin it to 1px and give the budget to the other side.
+  if (h < 1) return { width: Math.min(width, Math.floor(maxPixels)), height: 1 };
+  if (w < 1) return { width: 1, height: Math.min(height, Math.floor(maxPixels)) };
+  return { width: w, height: h };
+}
+
+/** Estimated image tokens, mirroring Qwen2-VL's smart_resize. Cloudflare's hosted preprocessing may differ. */
+export function estimateImageTokens(width: number, height: number) {
+  const f = TOKEN_BLOCK;
+  let h = Math.max(f, Math.round(height / f) * f);
+  let w = Math.max(f, Math.round(width / f) * f);
+  if (h * w > MAX_IMAGE_PIXELS) {
+    const beta = Math.sqrt((height * width) / MAX_IMAGE_PIXELS);
+    h = Math.max(f, Math.floor(height / beta / f) * f);
+    w = Math.max(f, Math.floor(width / beta / f) * f);
+  } else if (h * w < MIN_IMAGE_PIXELS) {
+    const beta = Math.sqrt(MIN_IMAGE_PIXELS / (height * width));
+    h = Math.ceil((height * beta) / f) * f;
+    w = Math.ceil((width * beta) / f) * f;
+  }
+  return (h / f) * (w / f);
+}
+
+/**
+ * Dropdown label for a downscale option: the resolution it produces for the given image (e.g. the largest
+ * attached one), or the square equivalent when there is no image.
+ */
+export function downscaleLabel(option: { label: string; maxPixels: number | null }, image?: { width: number; height: number }) {
+  if (image) {
+    const { width, height } = fitWithin(image.width, image.height, option.maxPixels);
+    return `${option.label} · ${width}×${height}`;
+  }
+  if (option.maxPixels == null) return option.label;
+  const side = Math.floor(Math.sqrt(option.maxPixels));
+  return `${option.label} · ${side}×${side}`;
+}
+
+export type SentImage = { width: number; height: number; bytes: number };
+
+/** API limits, checked against the images that will actually be sent. */
+export function validateSentImages(images: SentImage[]): string[] {
+  const errs: string[] = [];
+  images.forEach((img, i) => {
+    if (img.bytes > MAX_IMAGE_BYTES) errs.push(`Image ${i + 1} is ${fmtBytes(img.bytes)}; max 4 MiB each. Pick a smaller downscale.`);
+    if (img.width * img.height > MAX_IMAGE_PIXELS)
+      errs.push(`Image ${i + 1} is ${fmtMp(img.width * img.height)}; max 16 MP. Pick a downscale.`);
+  });
+  const total = images.reduce((s, i) => s + i.bytes, 0);
+  if (total > MAX_TOTAL_BYTES) errs.push(`Images total ${fmtBytes(total)}; max 8 MiB. Pick a smaller downscale.`);
+  return errs;
+}
+
+export const fmtBytes = (n: number) =>
+  n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MiB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+export const fmtMp = (pixels: number) => `${(pixels / 1024 / 1024).toFixed(1)} MP`;
+export const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));

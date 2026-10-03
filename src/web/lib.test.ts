@@ -2,15 +2,22 @@ import { describe, expect, test } from "bun:test";
 import type { Questions } from "../shared";
 import {
   DEFAULT_QUESTIONS,
+  DOWNSCALE_OPTIONS,
   argmax,
   blankDraft,
   dataUrlBytes,
+  downscaleLabel,
   draftsFromQuestions,
+  estimateImageTokens,
+  fitWithin,
+  fmtBytes,
   fmtMs,
+  fmtTokens,
   fmtUsd,
   pct,
   questionsFromDrafts,
   validateDrafts,
+  validateSentImages,
   type QDraft,
 } from "./lib";
 
@@ -153,5 +160,88 @@ describe("dataUrlBytes", () => {
 
   test("matches the decoded size for every padding case", () => {
     for (const n of [0, 1, 2, 3, 4, 5, 1000, 4 * 1024 * 1024]) expect(dataUrlBytes(url(n))).toBe(n);
+  });
+});
+
+describe("fitWithin", () => {
+  test("leaves images at or under the limit alone, and never upscales", () => {
+    expect(fitWithin(1000, 1000, 1024 * 1024)).toEqual({ width: 1000, height: 1000 });
+    expect(fitWithin(1024, 1024, 1024 * 1024)).toEqual({ width: 1024, height: 1024 });
+    expect(fitWithin(5000, 5000, null)).toEqual({ width: 5000, height: 5000 });
+  });
+
+  test("scales down to fit, keeping the aspect ratio", () => {
+    const { width, height } = fitWithin(4032, 3024, 1024 * 1024);
+    expect(width * height).toBeLessThanOrEqual(1024 * 1024);
+    expect(width * height).toBeGreaterThan(0.99 * 1024 * 1024);
+    expect(width / height).toBeCloseTo(4032 / 3024, 2);
+  });
+
+  test("handles extreme aspect ratios without going to zero", () => {
+    expect(fitWithin(100_000, 1, 1000)).toEqual({ width: 1000, height: 1 });
+  });
+});
+
+describe("estimateImageTokens", () => {
+  test("one token per 32×32 block", () => {
+    expect(estimateImageTokens(1024, 1024)).toBe(1024);
+    expect(estimateImageTokens(1920, 1080)).toBe(60 * 34); // 1080 rounds to 1088
+  });
+
+  test("small images are scaled up to the minimum (64 tokens)", () => {
+    expect(estimateImageTokens(32, 32)).toBe(64);
+    expect(estimateImageTokens(100, 100)).toBe(64);
+  });
+
+  test("huge images are capped at 16 MP (16,384 tokens)", () => {
+    expect(estimateImageTokens(8000, 6000)).toBeLessThanOrEqual(16_384);
+    expect(estimateImageTokens(8000, 6000)).toBeGreaterThan(16_000);
+  });
+});
+
+describe("validateSentImages", () => {
+  const MiB = 1024 * 1024;
+
+  test("accepts images within the API limits", () => {
+    expect(validateSentImages([{ width: 4096, height: 4096, bytes: 4 * MiB }])).toEqual([]);
+    expect(validateSentImages([])).toEqual([]);
+  });
+
+  test("flags per-image size and resolution, and the total", () => {
+    expect(validateSentImages([{ width: 10, height: 10, bytes: 4 * MiB + 1 }])[0]).toContain("max 4 MiB each");
+    expect(validateSentImages([{ width: 4097, height: 4096, bytes: 1 }])[0]).toContain("max 16 MP");
+    const three = Array(3).fill({ width: 10, height: 10, bytes: 3 * MiB });
+    expect(validateSentImages(three)).toEqual(["Images total 9.0 MiB; max 8 MiB. Pick a smaller downscale."]);
+  });
+});
+
+describe("image formatting", () => {
+  test("fmtBytes / fmtTokens", () => {
+    expect(fmtBytes(500)).toBe("1 KB");
+    expect(fmtBytes(380 * 1024)).toBe("380 KB");
+    expect(fmtBytes(3.5 * 1024 * 1024)).toBe("3.5 MiB");
+    expect(fmtTokens(999)).toBe("999");
+    expect(fmtTokens(1900)).toBe("1.9k");
+  });
+
+  test("every downscale option is within the API's pixel range", () => {
+    for (const o of DOWNSCALE_OPTIONS.filter((o) => o.maxPixels !== null))
+      expect(o.maxPixels!).toBeLessThanOrEqual(16_777_216);
+  });
+});
+
+describe("downscaleLabel", () => {
+  const option = (label: string) => DOWNSCALE_OPTIONS.find((o) => o.label === label)!;
+
+  test("shows the resulting resolution for the given image", () => {
+    expect(downscaleLabel(option("1 MP"), { width: 4032, height: 3024 })).toBe("1 MP · 1182×886");
+    expect(downscaleLabel(option("Original"), { width: 4032, height: 3024 })).toBe("Original · 4032×3024");
+    expect(downscaleLabel(option("8 MP"), { width: 800, height: 600 })).toBe("8 MP · 800×600");
+  });
+
+  test("falls back to the square equivalent without an image", () => {
+    expect(downscaleLabel(option("1 MP"))).toBe("1 MP · 1024×1024");
+    expect(downscaleLabel(option("0.25 MP"))).toBe("0.25 MP · 512×512");
+    expect(downscaleLabel(option("Original"))).toBe("Original");
   });
 });
