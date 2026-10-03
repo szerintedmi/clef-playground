@@ -46,3 +46,7 @@ routes with a mocked Cloudflare backend (`src/api.ts`). No credentials needed.
 - Cost is computed from `usage.input_tokens` at the published unit price ($0.24/M for clef, $0.09/M for clef-flash; see `src/shared.ts`). Cloudflare only publishes an input-token price for these models.
 - Inference time is the round trip from the local server to the Cloudflare API.
 - `⌘↵` / `Ctrl+Enter` runs the current request.
+
+## License
+
+[MIT](LICENSE)

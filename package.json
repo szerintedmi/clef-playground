@@ -23,5 +23,6 @@
     "db:migrate": "bun src/migrate.ts up",
     "db:status": "bun src/migrate.ts status",
     "db:new": "bun src/migrate.ts new"
-  }
+  },
+  "license": "MIT"
 }
