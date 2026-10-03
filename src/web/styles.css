@@ -54,15 +54,27 @@ main {
   flex: 1; min-height: 0;
   display: grid; grid-template-columns: minmax(280px, 1fr) minmax(340px, 1.15fr) minmax(320px, 1.1fr);
 }
+main.q-collapsed { grid-template-columns: minmax(280px, 1fr) 40px minmax(320px, 2.25fr); }
 @media (max-width: 1000px) {
-  main { grid-template-columns: 1fr; overflow: auto; }
+  main, main.q-collapsed { grid-template-columns: 1fr; overflow: auto; }
   .col { overflow: visible !important; }
+  .col.rail { flex-direction: row; }
+  .col.rail .rail-label { writing-mode: horizontal-tb; transform: none; }
 }
 .col {
   display: flex; flex-direction: column; gap: 10px;
   padding: 14px 16px; overflow-y: auto; border-right: 1px solid var(--border);
 }
 .col:last-child { border-right: 0; }
+.col.rail { padding: 10px 4px; align-items: center; gap: 12px; overflow: hidden; }
+.rail-label {
+  writing-mode: vertical-rl; transform: rotate(180deg);
+  background: transparent; border: 0; padding: 4px 0; color: var(--muted);
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600;
+}
+.rail-label:hover { color: var(--text); }
+.rail-label .muted { text-transform: none; letter-spacing: 0; }
+.rail-err { color: var(--bad); }
 .colhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; margin: 0; font-weight: 600; }
 h2 .muted { font-weight: 400; letter-spacing: 0; margin-left: 4px; text-transform: none; }

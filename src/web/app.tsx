@@ -293,6 +293,13 @@ function App() {
 
   const [drafts, setDrafts] = useState<QDraft[]>(() => draftsFromQuestions(DEFAULT_QUESTIONS));
   const [rawMode, setRawMode] = useState(false);
+  const [questionsCollapsed, setQuestionsCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("clef.questionsCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
   const [rawText, setRawText] = useState("");
   const [rawError, setRawError] = useState("");
 
@@ -371,6 +378,14 @@ function App() {
     setMaxPixels(v);
     try {
       localStorage.setItem("clef.maxPixels", v === null ? "original" : String(v));
+    } catch {}
+  };
+
+  const toggleQuestions = () => {
+    const v = !questionsCollapsed;
+    setQuestionsCollapsed(v);
+    try {
+      localStorage.setItem("clef.questionsCollapsed", v ? "1" : "0");
     } catch {}
   };
 
@@ -507,7 +522,7 @@ function App() {
         </button>
       </header>
 
-      <main>
+      <main className={questionsCollapsed ? "q-collapsed" : ""}>
         {/* ---------- input ---------- */}
         <section className="col">
           <div className="colhead">
@@ -636,11 +651,23 @@ function App() {
         </section>
 
         {/* ---------- questions ---------- */}
+        {questionsCollapsed ? (
+          <section className="col rail">
+            <button className="ghost" onClick={toggleQuestions} title="Show questions">
+              »
+            </button>
+            <button className="rail-label" onClick={toggleQuestions} title="Show questions">
+              Questions <span className="muted">{drafts.length}</span>
+              {validation.length > 0 && <span className="rail-err"> ⚠</span>}
+            </button>
+          </section>
+        ) : (
         <section className="col">
           <div className="colhead">
             <h2>
               Questions <span className="muted">{drafts.length}/64</span>
             </h2>
+            <span className="spacer" />
             <div className="seg small">
               <button className={!rawMode ? "on" : ""} onClick={() => rawMode && applyRaw() && setRawMode(false)}>
                 form
@@ -649,6 +676,9 @@ function App() {
                 JSON
               </button>
             </div>
+            <button className="ghost" onClick={toggleQuestions} title="Collapse questions">
+              «
+            </button>
           </div>
           <SavedPicker
             label="question set"
@@ -705,6 +735,7 @@ function App() {
             </div>
           )}
         </section>
+        )}
 
         {/* ---------- results ---------- */}
         <section className="col">
