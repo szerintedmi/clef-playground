@@ -1,55 +1,81 @@
 import type { Store } from "./db";
-import { MODELS, costFor, type ClefResult, type RunRequest, type RunResponse } from "./shared";
+import {
+  OPENAI_DECISIONS_URL,
+  decisionsErrorMessage,
+  fromDecisionsResponse,
+  toDecisionsRequest,
+  type DecisionsError,
+  type DecisionsResponse,
+} from "./openai";
+import { MODELS, costFor, type ClefResult, type Provider, type RunRequest, type RunResponse } from "./shared";
 
 export type ApiConfig = {
   store: Store;
   accountId?: string;
   apiToken?: string;
-  // Injectable so tests can stand in for the Cloudflare API.
+  openaiApiKey?: string;
+  // Injectable so tests can stand in for the Cloudflare / OpenAI APIs.
   fetch?: typeof fetch;
 };
 
 const badRequest = (error: string) => Response.json({ error }, { status: 400 });
 
-export function apiRoutes({ store, accountId, apiToken, fetch: doFetch = fetch }: ApiConfig) {
-  const configured = !!(accountId && apiToken);
+const MISSING_CREDENTIALS: Record<Provider, string> = {
+  cloudflare: "Missing CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN in .env",
+  openai: "Missing OPENAI_API_KEY in .env",
+};
 
-  async function runClef(body: RunRequest): Promise<RunResponse> {
-    const model = MODELS[body.model];
+type Outcome = { raw: unknown; result?: ClefResult; error?: string };
+
+const httpError = (status: number, raw: unknown) =>
+  `HTTP ${status}: ${typeof raw === "string" ? raw.slice(0, 500) : JSON.stringify(raw).slice(0, 500)}`;
+
+export function apiRoutes({ store, accountId, apiToken, openaiApiKey, fetch: doFetch = fetch }: ApiConfig) {
+  const configured: Record<Provider, boolean> = { cloudflare: !!(accountId && apiToken), openai: !!openaiApiKey };
+
+  async function postJson(url: string, token: string, payload: unknown) {
+    const res = await doFetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const text = await res.text();
+    try {
+      return { res, raw: JSON.parse(text) as unknown };
+    } catch {
+      return { res, raw: text as unknown };
+    }
+  }
+
+  async function callCloudflare(body: RunRequest): Promise<Outcome> {
     const payload: Record<string, unknown> = { model: body.model, state: body.state, questions: body.questions };
     if (body.images.length) payload.images = body.images;
+    const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${MODELS[body.model].id}`;
+    const { res, raw } = await postJson(url, apiToken!, payload);
+    const env = raw as { success?: boolean; result?: ClefResult; errors?: { code?: number; message: string }[] };
+    if (res.ok && env?.success !== false && env?.result) return { raw, result: env.result };
+    const error = env?.errors?.map((e) => (e.code ? `[${e.code}] ${e.message}` : e.message)).join("; ");
+    return { raw, error: error || httpError(res.status, raw) };
+  }
 
+  async function callOpenAI(body: RunRequest): Promise<Outcome> {
+    const { res, raw } = await postJson(OPENAI_DECISIONS_URL, openaiApiKey!, toDecisionsRequest(MODELS[body.model].id, body));
+    const r = raw as Partial<DecisionsResponse & DecisionsError>;
+    if (res.ok && Array.isArray(r?.answers)) return { raw, result: fromDecisionsResponse(r as DecisionsResponse) };
+    return { raw, error: r?.error?.message ? decisionsErrorMessage(r.error) : httpError(res.status, raw) };
+  }
+
+  async function run(body: RunRequest): Promise<RunResponse> {
     const started = performance.now();
-    let ok = false;
-    let result: ClefResult | undefined;
-    let error: string | undefined;
-    let raw: unknown;
-
+    let outcome: Outcome;
     try {
-      const res = await doFetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model.id}`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const text = await res.text();
-      try {
-        raw = JSON.parse(text);
-      } catch {
-        raw = text;
-      }
-      const env = raw as { success?: boolean; result?: ClefResult; errors?: { code?: number; message: string }[] };
-      if (res.ok && env?.success !== false && env?.result) {
-        ok = true;
-        result = env.result;
-      } else {
-        error =
-          env?.errors?.map((e) => (e.code ? `[${e.code}] ${e.message}` : e.message)).join("; ") ||
-          `HTTP ${res.status}: ${typeof raw === "string" ? raw.slice(0, 500) : JSON.stringify(raw).slice(0, 500)}`;
-      }
+      outcome = MODELS[body.model].provider === "openai" ? await callOpenAI(body) : await callCloudflare(body);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-      raw = { error };
+      const error = e instanceof Error ? e.message : String(e);
+      outcome = { raw: { error }, error };
     }
+    const { raw, result, error } = outcome;
+    const ok = !!result;
 
     const latencyMs = performance.now() - started;
     const inputTokens = result?.usage?.input_tokens ?? 0;
@@ -75,12 +101,13 @@ export function apiRoutes({ store, accountId, apiToken, fetch: doFetch = fetch }
 
     "/api/run": {
       POST: async (req: Request) => {
-        if (!configured) return badRequest("Missing CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN in .env");
         const body = (await req.json()) as RunRequest;
         if (!(body.model in MODELS)) return badRequest(`Unknown model: ${body.model}`);
+        const provider = MODELS[body.model].provider;
+        if (!configured[provider]) return badRequest(MISSING_CREDENTIALS[provider]);
         if (!body.questions || !Object.keys(body.questions).length) return badRequest("Add at least one question");
         body.images ??= [];
-        return Response.json(await runClef(body));
+        return Response.json(await run(body));
       },
     },
 

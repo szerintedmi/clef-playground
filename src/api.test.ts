@@ -20,8 +20,14 @@ let store: Store;
 let server: ReturnType<typeof Bun.serve>;
 let cloudflare: ReturnType<typeof mock<(url: string, init: RequestInit) => Promise<Response>>>;
 
-// Starts the API on a random port with a fake Cloudflare backend.
-function start(opts: { configured?: boolean } = {}) {
+const DECISIONS = {
+  model: "gpt-6-luna",
+  answers: [{ type: "predicate", name: "urgent", probability: 0.88 }],
+  usage: { input_tokens: 268, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, total_tokens: 268 },
+};
+
+// Starts the API on a random port with a fake Cloudflare / OpenAI backend.
+function start(opts: { configured?: boolean; openai?: boolean } = {}) {
   const configured = opts.configured ?? true;
   server = Bun.serve({
     port: 0,
@@ -29,6 +35,7 @@ function start(opts: { configured?: boolean } = {}) {
       store,
       accountId: configured ? "acct123" : undefined,
       apiToken: configured ? "tok" : undefined,
+      openaiApiKey: opts.openai ?? true ? "sk-test" : undefined,
       fetch: cloudflare as unknown as typeof fetch,
     }),
   });
@@ -150,12 +157,78 @@ describe("/api/run", () => {
   });
 });
 
+describe("/api/run with an OpenAI model", () => {
+  const OPENAI_REQUEST: RunRequest = { ...REQUEST, model: "gpt-6-luna" };
+
+  test("sends a Decisions API request and normalizes the answers", async () => {
+    cloudflare.mockImplementation(async () => Response.json(DECISIONS));
+    start({ configured: false });
+    const { body } = await post("/api/run", { ...OPENAI_REQUEST, images: ["data:image/png;base64,AAAA"] });
+
+    const [url, init] = cloudflare.mock.calls[0]!;
+    expect(url).toBe("https://api.openai.com/v1/decisions");
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer sk-test");
+    expect(JSON.parse(init.body as string)).toEqual({
+      model: "gpt-6-luna",
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: "Checkout is down" },
+            { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+          ],
+        },
+      ],
+      questions: [{ type: "predicate", name: "urgent", instructions: "Urgent?" }],
+    });
+
+    expect(body.ok).toBe(true);
+    expect(body.result).toEqual({
+      model: "gpt-6-luna",
+      answers: { urgent: { type: "noul", noul: 0.88 } },
+      usage: { input_tokens: 268, output_tokens: 0 },
+    });
+    expect(body.costUsd).toBeCloseTo(costFor("gpt-6-luna", 268), 12);
+  });
+
+  test("records the run with tokens and cost", async () => {
+    cloudflare.mockImplementation(async () => Response.json(DECISIONS));
+    start();
+    const { body } = await post("/api/run", OPENAI_REQUEST);
+    const saved = store.runs.get(body.id)!;
+    expect(saved).toMatchObject({ ok: true, model: "gpt-6-luna", inputTokens: 268, outputTokens: 0, response: DECISIONS });
+    expect(saved.costUsd).toBeCloseTo(0.0000268, 12);
+  });
+
+  test("surfaces OpenAI errors", async () => {
+    cloudflare.mockImplementation(async () =>
+      Response.json(
+        { error: { message: "Incorrect API key provided", type: "invalid_request_error", code: "invalid_api_key" } },
+        { status: 401 },
+      ),
+    );
+    start();
+    const { body } = await post("/api/run", OPENAI_REQUEST);
+    expect(body).toMatchObject({ ok: false, error: "[invalid_api_key] Incorrect API key provided", costUsd: 0 });
+    expect(store.runs.get(body.id)).toMatchObject({ ok: false, inputTokens: 0 });
+  });
+
+  test("requires OPENAI_API_KEY only for OpenAI models", async () => {
+    start({ openai: false });
+    const { status, body } = await post("/api/run", OPENAI_REQUEST);
+    expect(status).toBe(400);
+    expect(body.error).toContain("OPENAI_API_KEY");
+    expect(cloudflare).not.toHaveBeenCalled();
+    expect((await post("/api/run", REQUEST)).body.ok).toBe(true);
+  });
+});
+
 describe("/api/config", () => {
-  test("reports whether credentials are configured", async () => {
+  test("reports which providers have credentials", async () => {
     start({ configured: false });
     const { body } = await call("/api/config");
-    expect(body.configured).toBe(false);
-    expect(Object.keys(body.models)).toEqual(["clef", "clef-flash"]);
+    expect(body.configured).toEqual({ cloudflare: false, openai: true });
+    expect(Object.keys(body.models)).toEqual(["clef", "clef-flash", "gpt-6-luna"]);
   });
 });
 

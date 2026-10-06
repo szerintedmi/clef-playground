@@ -1,10 +1,13 @@
 // Types and constants shared by the server and the web UI.
 
-export type ModelName = "clef" | "clef-flash";
+export type ModelName = "clef" | "clef-flash" | "gpt-6-luna";
+export type Provider = "cloudflare" | "openai";
 
-export const MODELS: Record<ModelName, { id: string; label: string; usdPerMInput: number }> = {
-  clef: { id: "@cf/cloudflare/clef", label: "clef (27B)", usdPerMInput: 0.24 },
-  "clef-flash": { id: "@cf/cloudflare/clef-flash", label: "clef-flash (9B)", usdPerMInput: 0.09 },
+export const MODELS: Record<ModelName, { id: string; label: string; provider: Provider; usdPerMInput: number }> = {
+  clef: { id: "@cf/cloudflare/clef", label: "clef (27B)", provider: "cloudflare", usdPerMInput: 0.24 },
+  "clef-flash": { id: "@cf/cloudflare/clef-flash", label: "clef-flash (9B)", provider: "cloudflare", usdPerMInput: 0.09 },
+  // OpenAI Decisions API; bills input tokens only (no cache or output-token charges).
+  "gpt-6-luna": { id: "gpt-6-luna", label: "gpt-6-luna (OpenAI)", provider: "openai", usdPerMInput: 0.1 },
 };
 
 export type NoulQuestion = {

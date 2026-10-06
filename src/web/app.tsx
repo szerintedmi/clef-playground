@@ -4,6 +4,7 @@ import {
   MODELS,
   type Answer,
   type ModelName,
+  type Provider,
   type Question,
   type QuestionSet,
   type Questions,
@@ -36,6 +37,7 @@ import {
   type QDraft,
 } from "./lib";
 import { prepareImage, type PreparedImage } from "./images";
+import { decisionsErrorMessage, fromDecisionsResponse, toDecisionsRequest, type DecisionsError, type DecisionsResponse } from "../openai";
 
 // ---------- helpers ----------
 
@@ -270,8 +272,10 @@ function ProbList(props: { probs: Record<string, number>; top: string; legend?: 
 // ---------- app ----------
 
 function App() {
-  const [configured, setConfigured] = useState(true);
+  const [configuredProviders, setConfiguredProviders] = useState<Record<Provider, boolean>>({ cloudflare: true, openai: true });
   const [model, setModel] = useState<ModelName>("clef");
+  const provider = MODELS[model].provider;
+  const configured = configuredProviders[provider];
 
   const [stateText, setStateText] = useState("Checkout has been failing for every customer for the last hour.");
   const [stateIsJson, setStateIsJson] = useState(false);
@@ -334,7 +338,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    api<{ configured: boolean }>("/api/config").then((c) => setConfigured(c.configured));
+    api<{ configured: Record<Provider, boolean> }>("/api/config").then((c) => setConfiguredProviders(c.configured));
     refresh();
     const runId = Number(new URLSearchParams(location.search).get("run"));
     if (runId) loadRun(runId);
@@ -402,7 +406,9 @@ function App() {
 
   const imagesReady = prepared.images === images && prepared.maxPixels === maxPixels;
   const sendErrors = useMemo(() => (imagesReady ? validateSentImages(prepared.items) : []), [imagesReady, prepared]);
-  const imageTokens = prepared.items.reduce((s, p) => s + p.tokens, 0);
+  // The estimate mirrors Clef's image processor; OpenAI doesn't document how it tokenizes images.
+  const showImageTokens = provider === "cloudflare";
+  const imageTokens = showImageTokens ? prepared.items.reduce((s, p) => s + p.tokens, 0) : 0;
   const largestImage = prepared.items
     .map((p) => ({ width: p.origWidth, height: p.origHeight }))
     .reduce<{ width: number; height: number } | undefined>((a, b) => (!a || b.width * b.height > a.width * a.height ? b : a), undefined);
@@ -485,21 +491,33 @@ function App() {
     setDrafts(draftsFromQuestions(r.request.questions));
     setRawMode(false);
     setResponseQuestions(r.request.questions);
-    const env = r.response as { result?: RunResponse["result"]; errors?: { message: string }[]; error?: string };
+    const env = r.response as {
+      result?: RunResponse["result"];
+      errors?: { message: string }[];
+      error?: string | DecisionsError["error"];
+    };
+    const isOpenAI = MODELS[r.model]?.provider === "openai";
+    const result = !r.ok ? undefined : isOpenAI ? fromDecisionsResponse(r.response as DecisionsResponse) : env?.result;
+    const error =
+      typeof env?.error === "object" && env.error ? decisionsErrorMessage(env.error) : (env?.error as string | undefined);
     setResponse({
       id: r.id,
       ok: r.ok,
-      result: env?.result,
-      error: r.ok ? undefined : env?.errors?.map((e) => e.message).join("; ") || env?.error || JSON.stringify(r.response),
+      result,
+      error: r.ok ? undefined : env?.errors?.map((e) => e.message).join("; ") || error || JSON.stringify(r.response),
       latencyMs: r.latencyMs,
       costUsd: r.costUsd,
     });
   };
 
   const result = response?.result;
-  const rawRequest = parsedState.ok
-    ? { model, state: parsedState.value, questions: questionsFromDrafts(drafts), ...(images.length ? { images: prepared.items.map((p, i) => `<image ${i + 1}: ${p.width}×${p.height}, ${fmtBytes(p.bytes)}>`) } : {}) }
-    : null;
+  const imagePlaceholders = prepared.items.map((p, i) => `<image ${i + 1}: ${p.width}×${p.height}, ${fmtBytes(p.bytes)}>`);
+  // What actually goes over the wire for the selected provider (images abbreviated).
+  const rawRequest = !parsedState.ok
+    ? null
+    : provider === "openai"
+      ? toDecisionsRequest(MODELS[model].id, { model, state: parsedState.value, questions: questionsFromDrafts(drafts), images: images.length ? imagePlaceholders : [] })
+      : { model, state: parsedState.value, questions: questionsFromDrafts(drafts), ...(images.length ? { images: imagePlaceholders } : {}) };
 
   return (
     <div className="app">
@@ -516,7 +534,11 @@ function App() {
           ))}
         </div>
         <span className="spacer" />
-        {!configured && <span className="warn">Set CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN in .env</span>}
+        {!configured && (
+          <span className="warn">
+            {provider === "openai" ? "Set OPENAI_API_KEY in .env" : "Set CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN in .env"}
+          </span>
+        )}
         <button className="primary" disabled={!canRun} onClick={run} title="⌘↵">
           {running ? "Running…" : "Run ⌘↵"}
         </button>
@@ -620,7 +642,7 @@ function App() {
                             {p.width}×{p.height}
                           </span>
                           <span className="muted">{fmtBytes(p.bytes)}</span>
-                          <span className="muted">~{fmtTokens(p.tokens)} tok</span>
+                          {showImageTokens && <span className="muted">~{fmtTokens(p.tokens)} tok</span>}
                         </div>
                       ) : (
                         <div className="mono caption muted">processing…</div>
