@@ -23,14 +23,27 @@ const blobToDataUrl = (blob: Blob) =>
     r.readAsDataURL(blob);
   });
 
-/** Downscales a data URL image to at most maxPixels (keeping its format), or passes it through if already small. */
-export async function prepareImage(src: string, maxPixels: number | null): Promise<PreparedImage> {
+export type ImageConstraints = {
+  maxSide: number | null; // longest side, in pixels
+  types: string[] | null; // accepted MIME types; others are re-encoded as PNG
+};
+
+/**
+ * Downscales a data URL image to at most maxPixels (keeping its format, if allowed), or passes it through if
+ * already small and in an accepted format.
+ */
+export async function prepareImage(
+  src: string,
+  maxPixels: number | null,
+  { maxSide, types }: ImageConstraints = { maxSide: null, types: null },
+): Promise<PreparedImage> {
   const blob = await (await fetch(src)).blob();
   const bitmap = await createImageBitmap(blob);
   const orig = { origWidth: bitmap.width, origHeight: bitmap.height, origBytes: dataUrlBytes(src) };
-  const { width, height } = fitWithin(bitmap.width, bitmap.height, maxPixels);
+  const { width, height } = fitWithin(bitmap.width, bitmap.height, maxPixels, maxSide);
+  const type = !types || types.includes(blob.type) ? blob.type || "image/png" : "image/png";
 
-  if (width === bitmap.width && height === bitmap.height) {
+  if (width === bitmap.width && height === bitmap.height && type === blob.type) {
     bitmap.close();
     return { url: src, width, height, bytes: orig.origBytes, tokens: estimateImageTokens(width, height), ...orig };
   }
@@ -41,7 +54,7 @@ export async function prepareImage(src: string, maxPixels: number | null): Promi
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(bitmap, 0, 0, width, height);
   bitmap.close();
-  const out = await canvas.convertToBlob({ type: blob.type || "image/png", quality: ENCODE_QUALITY });
+  const out = await canvas.convertToBlob({ type, quality: ENCODE_QUALITY });
   const url = await blobToDataUrl(out);
   return { url, width, height, bytes: out.size, tokens: estimateImageTokens(width, height), ...orig };
 }

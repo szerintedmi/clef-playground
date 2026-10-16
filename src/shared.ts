@@ -1,10 +1,18 @@
 // Types and constants shared by the server and the web UI.
 
-export type ModelName = "clef" | "clef-flash";
+export type ModelName = "clef" | "clef-flash" | "gpt-6-luna" | "jev-1.14" | "jev-1.13";
+export type Provider = "cloudflare" | "openai" | "typesafe";
 
-export const MODELS: Record<ModelName, { id: string; label: string; usdPerMInput: number }> = {
-  clef: { id: "@cf/cloudflare/clef", label: "clef (27B)", usdPerMInput: 0.24 },
-  "clef-flash": { id: "@cf/cloudflare/clef-flash", label: "clef-flash (9B)", usdPerMInput: 0.09 },
+export type ModelInfo = { id: string; label: string; provider: Provider; usdPerMInput: number; box?: boolean };
+
+export const MODELS: Record<ModelName, ModelInfo> = {
+  clef: { id: "@cf/cloudflare/clef", label: "clef (27B)", provider: "cloudflare", usdPerMInput: 0.24 },
+  "clef-flash": { id: "@cf/cloudflare/clef-flash", label: "clef-flash (9B)", provider: "cloudflare", usdPerMInput: 0.09 },
+  // OpenAI Decisions API; bills input tokens only (no cache or output-token charges).
+  "gpt-6-luna": { id: "gpt-6-luna", label: "gpt-6-luna (OpenAI)", provider: "openai", usdPerMInput: 0.1 },
+  // TypeSafe System One; bills input tokens only. Box questions need Jev 1.14 (currently `jev-preview`).
+  "jev-1.14": { id: "jev-1.14.0", label: "jev-1.14 (TypeSafe)", provider: "typesafe", usdPerMInput: 0.042, box: true },
+  "jev-1.13": { id: "jev-1.13.0", label: "jev-1.13 (TypeSafe)", provider: "typesafe", usdPerMInput: 0.042 },
 };
 
 export type NoulQuestion = {
@@ -22,7 +30,12 @@ export type ScoreQuestion = {
   instructions: string;
   criteria: string[];
 };
-export type Question = NoulQuestion | ChoiceQuestion | ScoreQuestion;
+// TypeSafe only (Jev 1.14+): where something is in an image. Takes no criteria.
+export type BoxQuestion = {
+  type: "box";
+  instructions: string;
+};
+export type Question = NoulQuestion | ChoiceQuestion | ScoreQuestion | BoxQuestion;
 export type Questions = Record<string, Question>;
 
 export type NoulAnswer = { type: "noul"; noul: number };
@@ -39,7 +52,10 @@ export type ScoreAnswer = {
   probabilities: Record<string, number>;
   confidence: number;
 };
-export type Answer = NoulAnswer | ChoiceAnswer | ScoreAnswer;
+// Edges as fractions of the image's width (left/right) and height (top/bottom), from the top-left corner.
+export type BoxEdges = { top: number; bottom: number; left: number; right: number };
+export type BoxAnswer = { type: "box"; box: BoxEdges; confidence: number };
+export type Answer = NoulAnswer | ChoiceAnswer | ScoreAnswer | BoxAnswer;
 
 export type ClefResult = {
   model: string;

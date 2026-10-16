@@ -20,8 +20,14 @@ let store: Store;
 let server: ReturnType<typeof Bun.serve>;
 let cloudflare: ReturnType<typeof mock<(url: string, init: RequestInit) => Promise<Response>>>;
 
-// Starts the API on a random port with a fake Cloudflare backend.
-function start(opts: { configured?: boolean } = {}) {
+const DECISIONS = {
+  model: "gpt-6-luna",
+  answers: [{ type: "predicate", name: "urgent", probability: 0.88 }],
+  usage: { input_tokens: 268, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, total_tokens: 268 },
+};
+
+// Starts the API on a random port with a fake Cloudflare / OpenAI backend.
+function start(opts: { configured?: boolean; openai?: boolean; typesafe?: boolean } = {}) {
   const configured = opts.configured ?? true;
   server = Bun.serve({
     port: 0,
@@ -29,6 +35,8 @@ function start(opts: { configured?: boolean } = {}) {
       store,
       accountId: configured ? "acct123" : undefined,
       apiToken: configured ? "tok" : undefined,
+      openaiApiKey: opts.openai ?? true ? "sk-test" : undefined,
+      typesafeApiKey: opts.typesafe ?? true ? "ts-test" : undefined,
       fetch: cloudflare as unknown as typeof fetch,
     }),
   });
@@ -150,12 +158,151 @@ describe("/api/run", () => {
   });
 });
 
+describe("/api/run with an OpenAI model", () => {
+  const OPENAI_REQUEST: RunRequest = { ...REQUEST, model: "gpt-6-luna" };
+
+  test("sends a Decisions API request and normalizes the answers", async () => {
+    cloudflare.mockImplementation(async () => Response.json(DECISIONS));
+    start({ configured: false });
+    const { body } = await post("/api/run", { ...OPENAI_REQUEST, images: ["data:image/png;base64,AAAA"] });
+
+    const [url, init] = cloudflare.mock.calls[0]!;
+    expect(url).toBe("https://api.openai.com/v1/decisions");
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer sk-test");
+    expect(JSON.parse(init.body as string)).toEqual({
+      model: "gpt-6-luna",
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: "Checkout is down" },
+            { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+          ],
+        },
+      ],
+      questions: [{ type: "predicate", name: "urgent", instructions: "Urgent?" }],
+    });
+
+    expect(body.ok).toBe(true);
+    expect(body.result).toEqual({
+      model: "gpt-6-luna",
+      answers: { urgent: { type: "noul", noul: 0.88 } },
+      usage: { input_tokens: 268, output_tokens: 0 },
+    });
+    expect(body.costUsd).toBeCloseTo(costFor("gpt-6-luna", 268), 12);
+  });
+
+  test("records the run with tokens and cost", async () => {
+    cloudflare.mockImplementation(async () => Response.json(DECISIONS));
+    start();
+    const { body } = await post("/api/run", OPENAI_REQUEST);
+    const saved = store.runs.get(body.id)!;
+    expect(saved).toMatchObject({ ok: true, model: "gpt-6-luna", inputTokens: 268, outputTokens: 0, response: DECISIONS });
+    expect(saved.costUsd).toBeCloseTo(0.0000268, 12);
+  });
+
+  test("surfaces OpenAI errors", async () => {
+    cloudflare.mockImplementation(async () =>
+      Response.json(
+        { error: { message: "Incorrect API key provided", type: "invalid_request_error", code: "invalid_api_key" } },
+        { status: 401 },
+      ),
+    );
+    start();
+    const { body } = await post("/api/run", OPENAI_REQUEST);
+    expect(body).toMatchObject({ ok: false, error: "[invalid_api_key] Incorrect API key provided", costUsd: 0 });
+    expect(store.runs.get(body.id)).toMatchObject({ ok: false, inputTokens: 0 });
+  });
+
+  test("requires OPENAI_API_KEY only for OpenAI models", async () => {
+    start({ openai: false });
+    const { status, body } = await post("/api/run", OPENAI_REQUEST);
+    expect(status).toBe(400);
+    expect(body.error).toContain("OPENAI_API_KEY");
+    expect(cloudflare).not.toHaveBeenCalled();
+    expect((await post("/api/run", REQUEST)).body.ok).toBe(true);
+  });
+});
+
+describe("/api/run with a TypeSafe model", () => {
+  const BOX_REQUEST: RunRequest = {
+    model: "jev-1.14",
+    state: "",
+    questions: { face: { type: "box", instructions: "the face in `images[0]`" } },
+    images: ["data:image/jpeg;base64,AAAA"],
+  };
+  const SYSTEM_ONE = {
+    model: "jev-1.14.0",
+    answers: { face: { type: "box", box: { top: 0.2, bottom: 0.6, left: 0.3, right: 0.7 }, confidence: 0.9 } },
+    usage: { input_tokens: 1200, output_tokens: 21 },
+  };
+
+  test("sends images as assets with the images header and returns the answers as-is", async () => {
+    cloudflare.mockImplementation(async () => Response.json(SYSTEM_ONE));
+    start({ configured: false });
+    const { body } = await post("/api/run", BOX_REQUEST);
+
+    const [url, init] = cloudflare.mock.calls[0]!;
+    expect(url).toBe("https://api.typesafe.ai/v1/systemone");
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer ts-test");
+    expect(headers["TypeSafe-Danger-Zone-Images"]).toBe("true");
+    const sent = JSON.parse(init.body as string);
+    const [ref] = Object.keys(sent.assets);
+    expect(sent).toEqual({
+      model: "jev-1.14.0",
+      state: { images: [ref] },
+      questions: BOX_REQUEST.questions,
+      assets: { [ref!]: { type: "image", format: "jpg", data_base64: "AAAA" } },
+    });
+
+    expect(body).toMatchObject({ ok: true, result: SYSTEM_ONE });
+    expect(body.costUsd).toBeCloseTo(costFor("jev-1.14", 1200), 12);
+    expect(store.runs.get(body.id)).toMatchObject({ ok: true, inputTokens: 1200, response: SYSTEM_ONE });
+  });
+
+  test("omits the images header for text-only requests", async () => {
+    cloudflare.mockImplementation(async () => Response.json({ ...SYSTEM_ONE, answers: RESULT.answers }));
+    start();
+    await post("/api/run", { ...REQUEST, model: "jev-1.13" });
+    const init = cloudflare.mock.calls[0]![1];
+    expect((init.headers as Record<string, string>)["TypeSafe-Danger-Zone-Images"]).toBeUndefined();
+    expect(JSON.parse(init.body as string)).toEqual({ model: "jev-1.13.0", state: REQUEST.state, questions: REQUEST.questions });
+  });
+
+  test("rejects box questions for models without box support", async () => {
+    start();
+    for (const model of ["jev-1.13", "clef", "gpt-6-luna"]) {
+      const { status, body } = await post("/api/run", { ...BOX_REQUEST, model });
+      expect(status).toBe(400);
+      expect(body.error).toContain("box");
+    }
+    expect(cloudflare).not.toHaveBeenCalled();
+  });
+
+  test("surfaces TypeSafe errors", async () => {
+    cloudflare.mockImplementation(async () =>
+      Response.json({ detail: { error_type: "authentication_error", message: "Bad key" } }, { status: 401 }),
+    );
+    start();
+    const { body } = await post("/api/run", BOX_REQUEST);
+    expect(body).toMatchObject({ ok: false, error: "[authentication_error] Bad key", costUsd: 0 });
+  });
+
+  test("requires TYPESAFE_API_KEY", async () => {
+    start({ typesafe: false });
+    const { status, body } = await post("/api/run", BOX_REQUEST);
+    expect(status).toBe(400);
+    expect(body.error).toContain("TYPESAFE_API_KEY");
+  });
+});
+
 describe("/api/config", () => {
-  test("reports whether credentials are configured", async () => {
+  test("reports which providers have credentials", async () => {
     start({ configured: false });
     const { body } = await call("/api/config");
-    expect(body.configured).toBe(false);
-    expect(Object.keys(body.models)).toEqual(["clef", "clef-flash"]);
+    expect(body.configured).toEqual({ cloudflare: false, openai: true, typesafe: true });
+    expect(Object.keys(body.models)).toEqual(["clef", "clef-flash", "gpt-6-luna", "jev-1.14", "jev-1.13"]);
   });
 });
 

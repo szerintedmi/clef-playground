@@ -1,4 +1,4 @@
-import type { Question, Questions } from "../shared";
+import type { Provider, Question, Questions } from "../shared";
 
 // ---------- question editor model ----------
 
@@ -41,7 +41,7 @@ export function draftsFromQuestions(qs: Questions): QDraft[] {
       d.noulFalse = asText(q.criteria?.false);
     } else if (q.type === "choice") {
       d.options = Object.entries(q.criteria).map(([key, desc]) => ({ key, desc: asText(desc) }));
-    } else {
+    } else if (q.type === "score") {
       d.levels = q.criteria.map(asText);
     }
     return d;
@@ -62,6 +62,8 @@ export function questionsFromDrafts(drafts: QDraft[]): Questions {
       const criteria: Record<string, string | null> = {};
       for (const o of d.options) if (o.key.trim()) criteria[o.key.trim()] = o.desc.trim() ? o.desc : null;
       out[id] = { type: "choice", instructions: d.instructions, criteria };
+    } else if (d.type === "box") {
+      out[id] = { type: "box", instructions: d.instructions };
     } else {
       out[id] = { type: "score", instructions: d.instructions, criteria: d.levels };
     }
@@ -69,7 +71,7 @@ export function questionsFromDrafts(drafts: QDraft[]): Questions {
   return out;
 }
 
-export function validateDrafts(drafts: QDraft[]): string[] {
+export function validateDrafts(drafts: QDraft[], opts: { box?: boolean } = {}): string[] {
   const errs: string[] = [];
   const seen = new Set<string>();
   if (!drafts.length) errs.push("Add at least one question.");
@@ -88,6 +90,7 @@ export function validateDrafts(drafts: QDraft[]): string[] {
     }
     if (d.type === "score" && (d.levels.length < 2 || d.levels.length > 10))
       errs.push(`"${id}": score needs 2–10 levels.`);
+    if (d.type === "box" && !opts.box) errs.push(`"${id}": box questions need jev-1.14.`);
   }
   return errs;
 }
@@ -155,8 +158,23 @@ export const DOWNSCALE_OPTIONS: { label: string; maxPixels: number | null }[] = 
 ];
 export const DEFAULT_MAX_PIXELS = 1024 * 1024;
 
-/** Largest size with the same aspect ratio that fits in maxPixels. Never upscales. */
-export function fitWithin(width: number, height: number, maxPixels: number | null) {
+// TypeSafe's image limits (https://docs.typesafe.ai/images#limits): PNG/JPEG, each side 280–1568 px.
+export const TYPESAFE_MIN_SIDE = 280;
+export const TYPESAFE_MAX_SIDE = 1568;
+export const TYPESAFE_MAX_IMAGE_BYTES = 16 * 1024 * 1024;
+export const TYPESAFE_IMAGE_TYPES = ["image/png", "image/jpeg"];
+
+/** Per-provider constraints applied while preparing images, on top of the selected downscale. */
+export const imageConstraints = (provider: Provider) =>
+  provider === "typesafe" ? { maxSide: TYPESAFE_MAX_SIDE, types: TYPESAFE_IMAGE_TYPES } : { maxSide: null, types: null };
+
+/** Largest size with the same aspect ratio that fits in maxPixels (and maxSide, if given). Never upscales. */
+export function fitWithin(width: number, height: number, maxPixels: number | null, maxSide: number | null = null) {
+  if (maxSide != null && Math.max(width, height) > maxSide) {
+    const scale = maxSide / Math.max(width, height);
+    const fitted = { width: Math.max(1, Math.floor(width * scale)), height: Math.max(1, Math.floor(height * scale)) };
+    return fitWithin(fitted.width, fitted.height, maxPixels);
+  }
   if (maxPixels == null || width * height <= maxPixels) return { width, height };
   const scale = Math.sqrt(maxPixels / (width * height));
   const w = Math.floor(width * scale);
@@ -201,8 +219,16 @@ export function downscaleLabel(option: { label: string; maxPixels: number | null
 export type SentImage = { width: number; height: number; bytes: number };
 
 /** API limits, checked against the images that will actually be sent. */
-export function validateSentImages(images: SentImage[]): string[] {
+export function validateSentImages(images: SentImage[], provider: Provider = "cloudflare"): string[] {
   const errs: string[] = [];
+  if (provider === "typesafe") {
+    images.forEach((img, i) => {
+      if (Math.min(img.width, img.height) < TYPESAFE_MIN_SIDE)
+        errs.push(`Image ${i + 1} is ${img.width}×${img.height}; TypeSafe needs at least ${TYPESAFE_MIN_SIDE} px per side. Pick a larger downscale.`);
+      if (img.bytes > TYPESAFE_MAX_IMAGE_BYTES) errs.push(`Image ${i + 1} is ${fmtBytes(img.bytes)}; max 16 MiB each.`);
+    });
+    return errs;
+  }
   images.forEach((img, i) => {
     if (img.bytes > MAX_IMAGE_BYTES) errs.push(`Image ${i + 1} is ${fmtBytes(img.bytes)}; max 4 MiB each. Pick a smaller downscale.`);
     if (img.width * img.height > MAX_IMAGE_PIXELS)
@@ -217,3 +243,10 @@ export const fmtBytes = (n: number) =>
   n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MiB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 export const fmtMp = (pixels: number) => `${(pixels / 1024 / 1024).toFixed(1)} MP`;
 export const fmtTokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+
+/** Which attached image a Box question is about: the first `images[i]` it mentions, else the first image. */
+export function boxImageIndex(instructions: string, imageCount: number): number {
+  const m = /images\[(\d+)\]/.exec(instructions);
+  const i = m ? Number(m[1]) : 0;
+  return i < imageCount ? i : 0;
+}
