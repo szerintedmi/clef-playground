@@ -49,6 +49,7 @@ function toDecisionQuestion(name: string, q: Question): DecisionQuestion {
       choices: Object.entries(q.criteria).map(([value, description]) => (description ? { value, description } : { value })),
     };
   }
+  if (q.type === "box") throw new Error("Box questions are not supported by the Decisions API");
   return { type: "score", name, instructions: q.instructions, levels: q.criteria.map((label) => ({ label })) };
 }
 

@@ -9,6 +9,7 @@ import {
   downscaleLabel,
   draftsFromQuestions,
   estimateImageTokens,
+  boxImageIndex,
   fitWithin,
   fmtBytes,
   fmtMs,
@@ -29,6 +30,7 @@ describe("draftsFromQuestions / questionsFromDrafts", () => {
       ...DEFAULT_QUESTIONS,
       spam: { type: "noul", instructions: "Spam?", criteria: { true: "Unsolicited", false: "Legit" } },
       lang: { type: "choice", instructions: "Language?", criteria: { en: null, de: "German" } },
+      face: { type: "box", instructions: "the face in `images[0]`" },
     };
     expect(questionsFromDrafts(draftsFromQuestions(qs))).toEqual(qs);
   });
@@ -83,6 +85,12 @@ describe("draftsFromQuestions / questionsFromDrafts", () => {
 describe("validateDrafts", () => {
   test("accepts the default questions", () => {
     expect(validateDrafts(draftsFromQuestions(DEFAULT_QUESTIONS))).toEqual([]);
+  });
+
+  test("allows box questions only for models that support them", () => {
+    const box = [draft({ id: "face", type: "box", instructions: "the face" })];
+    expect(validateDrafts(box, { box: true })).toEqual([]);
+    expect(validateDrafts(box)).toEqual(['"face": box questions need jev-1.14.']);
   });
 
   test("requires at least one question", () => {
@@ -180,6 +188,13 @@ describe("fitWithin", () => {
   test("handles extreme aspect ratios without going to zero", () => {
     expect(fitWithin(100_000, 1, 1000)).toEqual({ width: 1000, height: 1 });
   });
+
+  test("also caps the longest side when maxSide is given", () => {
+    expect(fitWithin(4032, 3024, null, 1568)).toEqual({ width: 1568, height: 1176 });
+    expect(fitWithin(1000, 800, null, 1568)).toEqual({ width: 1000, height: 800 });
+    const { width, height } = fitWithin(4032, 3024, 1024 * 1024, 1568);
+    expect(width * height).toBeLessThanOrEqual(1024 * 1024);
+  });
 });
 
 describe("estimateImageTokens", () => {
@@ -212,6 +227,19 @@ describe("validateSentImages", () => {
     expect(validateSentImages([{ width: 4097, height: 4096, bytes: 1 }])[0]).toContain("max 16 MP");
     const three = Array(3).fill({ width: 10, height: 10, bytes: 3 * MiB });
     expect(validateSentImages(three)).toEqual(["Images total 9.0 MiB; max 8 MiB. Pick a smaller downscale."]);
+  });
+
+  test("applies TypeSafe's limits for TypeSafe models", () => {
+    expect(validateSentImages([{ width: 1568, height: 280, bytes: 5 * MiB }], "typesafe")).toEqual([]);
+    expect(validateSentImages([{ width: 1000, height: 279, bytes: 1 }], "typesafe")[0]).toContain("at least 280 px");
+  });
+});
+
+describe("boxImageIndex", () => {
+  test("finds the image a box question mentions", () => {
+    expect(boxImageIndex("the face in `images[1]`", 2)).toBe(1);
+    expect(boxImageIndex("the face", 2)).toBe(0);
+    expect(boxImageIndex("the face in `images[3]`", 2)).toBe(0);
   });
 });
 

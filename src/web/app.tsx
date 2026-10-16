@@ -23,12 +23,14 @@ import {
   argmax,
   asText,
   blankDraft,
+  boxImageIndex,
   downscaleLabel,
   draftsFromQuestions,
   fmtBytes,
   fmtMs,
   fmtTokens,
   fmtUsd,
+  imageConstraints,
   pct,
   questionsFromDrafts,
   uid,
@@ -38,6 +40,7 @@ import {
 } from "./lib";
 import { prepareImage, type PreparedImage } from "./images";
 import { decisionsErrorMessage, fromDecisionsResponse, toDecisionsRequest, type DecisionsError, type DecisionsResponse } from "../openai";
+import { isSystemOneResult, toSystemOneRequest, typesafeErrorMessage, type TypeSafeError } from "../typesafe";
 
 // ---------- helpers ----------
 
@@ -117,7 +120,7 @@ function QuestionCard(props: {
       <div className="qhead">
         <input className="mono qid" value={d.id} placeholder="question_id" onChange={(e) => set({ id: e.target.value })} />
         <div className="seg small">
-          {(["noul", "choice", "score"] as const).map((t) => (
+          {(["noul", "choice", "score", "box"] as const).map((t) => (
             <button key={t} className={d.type === t ? "on" : ""} onClick={() => set({ type: t })}>
               {t}
             </button>
@@ -133,7 +136,15 @@ function QuestionCard(props: {
       </div>
       <textarea
         rows={2}
-        placeholder={d.type === "noul" ? "Yes/no question…" : d.type === "choice" ? "What should be decided…" : "What should be rated…"}
+        placeholder={
+          d.type === "noul"
+            ? "Yes/no question…"
+            : d.type === "choice"
+              ? "What should be decided…"
+              : d.type === "score"
+                ? "What should be rated…"
+                : "What to find, e.g. the face in `images[0]`"
+        }
         value={d.instructions}
         onChange={(e) => set({ instructions: e.target.value })}
       />
@@ -199,6 +210,13 @@ function QuestionCard(props: {
           )}
         </div>
       )}
+      {d.type === "box" && (
+        <div className="muted tiny">
+          TypeSafe jev-1.14 only. Returns one bounding box; there is no "not found" answer, so pair it with a noul if the
+          target may be absent. Attached images are in the state as <span className="mono">images[0]</span>,{" "}
+          <span className="mono">images[1]</span>, …
+        </div>
+      )}
     </div>
   );
 }
@@ -211,7 +229,21 @@ function Bar({ p, highlight }: { p: number; highlight?: boolean }) {
   );
 }
 
-function AnswerCard({ id, a, q }: { id: string; a: Answer; q?: Question }) {
+function BoxPreview({ a, src }: { a: Extract<Answer, { type: "box" }>; src: string }) {
+  const { top, bottom, left, right } = a.box;
+  const pctOf = (v: number) => `${(v * 100).toFixed(2)}%`;
+  return (
+    <div className="boxpreview">
+      <img src={src} />
+      <div
+        className="bbox"
+        style={{ left: pctOf(left), top: pctOf(top), width: pctOf(right - left), height: pctOf(bottom - top) }}
+      />
+    </div>
+  );
+}
+
+function AnswerCard({ id, a, q, images }: { id: string; a: Answer; q?: Question; images: string[] }) {
   return (
     <div className="acard">
       <div className="ahead">
@@ -247,6 +279,21 @@ function AnswerCard({ id, a, q }: { id: string; a: Answer; q?: Question }) {
           <ProbList probs={a.probabilities} legend={a.legend} top={argmax(a.probabilities)} keepOrder />
         </>
       )}
+      {a.type === "box" && (
+        <>
+          <div className="summary">
+            <span className="mono edges">
+              {(["top", "bottom", "left", "right"] as const).map((k) => (
+                <span key={k}>
+                  {k} {a.box[k].toFixed(3)}
+                </span>
+              ))}
+            </span>
+            <span className="muted">confidence {pct(a.confidence)}</span>
+          </div>
+          {images.length > 0 && <BoxPreview a={a} src={images[boxImageIndex(asText(q?.instructions), images.length)]!} />}
+        </>
+      )}
     </div>
   );
 }
@@ -272,7 +319,11 @@ function ProbList(props: { probs: Record<string, number>; top: string; legend?: 
 // ---------- app ----------
 
 function App() {
-  const [configuredProviders, setConfiguredProviders] = useState<Record<Provider, boolean>>({ cloudflare: true, openai: true });
+  const [configuredProviders, setConfiguredProviders] = useState<Record<Provider, boolean>>({
+    cloudflare: true,
+    openai: true,
+    typesafe: true,
+  });
   const [model, setModel] = useState<ModelName>("clef");
   const provider = MODELS[model].provider;
   const configured = configuredProviders[provider];
@@ -289,11 +340,12 @@ function App() {
       return DEFAULT_MAX_PIXELS;
     }
   });
-  const [prepared, setPrepared] = useState<{ images: string[]; maxPixels: number | null; items: PreparedImage[] }>({
-    images: [],
-    maxPixels: null,
-    items: [],
-  });
+  const [prepared, setPrepared] = useState<{
+    images: string[];
+    maxPixels: number | null;
+    provider: Provider;
+    items: PreparedImage[];
+  }>({ images: [], maxPixels: null, provider, items: [] });
 
   const [drafts, setDrafts] = useState<QDraft[]>(() => draftsFromQuestions(DEFAULT_QUESTIONS));
   const [rawMode, setRawMode] = useState(false);
@@ -310,6 +362,7 @@ function App() {
   const [running, setRunning] = useState(false);
   const [response, setResponse] = useState<RunResponse | null>(null);
   const [responseQuestions, setResponseQuestions] = useState<Questions>({});
+  const [responseImages, setResponseImages] = useState<string[]>([]); // as sent, for drawing box answers
   const [showRaw, setShowRaw] = useState(false);
 
   const [sets, setSets] = useState<QuestionSet[]>([]);
@@ -354,7 +407,7 @@ function App() {
     }
   }, [stateText, stateIsJson]);
 
-  const validation = useMemo(() => validateDrafts(drafts), [drafts]);
+  const validation = useMemo(() => validateDrafts(drafts, { box: MODELS[model].box }), [drafts, model]);
 
   // --- images
   const addFiles = async (files: FileList | File[]) => {
@@ -393,19 +446,22 @@ function App() {
     } catch {}
   };
 
-  // Re-encode whenever the originals or the downscale setting change.
+  // Re-encode whenever the originals, the downscale setting, or the provider's image limits change.
   useEffect(() => {
     let cancelled = false;
-    Promise.all(images.map((src) => prepareImage(src, maxPixels)))
-      .then((items) => !cancelled && setPrepared({ images, maxPixels, items }))
+    Promise.all(images.map((src) => prepareImage(src, maxPixels, imageConstraints(provider))))
+      .then((items) => !cancelled && setPrepared({ images, maxPixels, provider, items }))
       .catch((e) => !cancelled && setImageError(`Could not process image: ${(e as Error).message}`));
     return () => {
       cancelled = true;
     };
-  }, [images, maxPixels]);
+  }, [images, maxPixels, provider]);
 
-  const imagesReady = prepared.images === images && prepared.maxPixels === maxPixels;
-  const sendErrors = useMemo(() => (imagesReady ? validateSentImages(prepared.items) : []), [imagesReady, prepared]);
+  const imagesReady = prepared.images === images && prepared.maxPixels === maxPixels && prepared.provider === provider;
+  const sendErrors = useMemo(
+    () => (imagesReady ? validateSentImages(prepared.items, provider) : []),
+    [imagesReady, prepared, provider],
+  );
   // The estimate mirrors Clef's image processor; OpenAI doesn't document how it tokenizes images.
   const showImageTokens = provider === "cloudflare";
   const imageTokens = showImageTokens ? prepared.items.reduce((s, p) => s + p.tokens, 0) : 0;
@@ -462,6 +518,7 @@ function App() {
       const res = await api<RunResponse>("/api/run", { method: "POST", body: JSON.stringify(body) });
       setResponse(res);
       setResponseQuestions(questions);
+      setResponseImages(body.images);
     } catch (e) {
       setResponse({ id: 0, ok: false, error: (e as Error).message, latencyMs: 0, costUsd: 0 });
     } finally {
@@ -491,15 +548,26 @@ function App() {
     setDrafts(draftsFromQuestions(r.request.questions));
     setRawMode(false);
     setResponseQuestions(r.request.questions);
+    setResponseImages(r.request.images);
     const env = r.response as {
       result?: RunResponse["result"];
       errors?: { message: string }[];
       error?: string | DecisionsError["error"];
+      detail?: TypeSafeError["detail"];
     };
-    const isOpenAI = MODELS[r.model]?.provider === "openai";
-    const result = !r.ok ? undefined : isOpenAI ? fromDecisionsResponse(r.response as DecisionsResponse) : env?.result;
-    const error =
-      typeof env?.error === "object" && env.error ? decisionsErrorMessage(env.error) : (env?.error as string | undefined);
+    const runProvider = MODELS[r.model]?.provider;
+    const result = !r.ok
+      ? undefined
+      : runProvider === "openai"
+        ? fromDecisionsResponse(r.response as DecisionsResponse)
+        : runProvider === "typesafe" && isSystemOneResult(r.response)
+          ? r.response
+          : env?.result;
+    const error = env?.detail
+      ? typesafeErrorMessage(env as TypeSafeError)
+      : typeof env?.error === "object" && env.error
+        ? decisionsErrorMessage(env.error)
+        : (env?.error as string | undefined);
     setResponse({
       id: r.id,
       ok: r.ok,
@@ -513,11 +581,17 @@ function App() {
   const result = response?.result;
   const imagePlaceholders = prepared.items.map((p, i) => `<image ${i + 1}: ${p.width}×${p.height}, ${fmtBytes(p.bytes)}>`);
   // What actually goes over the wire for the selected provider (images abbreviated).
-  const rawRequest = !parsedState.ok
+  let refN = 0;
+  const previewBody: RunRequest | null = parsedState.ok
+    ? { model, state: parsedState.value, questions: questionsFromDrafts(drafts), images: images.length ? imagePlaceholders : [] }
+    : null;
+  const rawRequest = !previewBody
     ? null
     : provider === "openai"
-      ? toDecisionsRequest(MODELS[model].id, { model, state: parsedState.value, questions: questionsFromDrafts(drafts), images: images.length ? imagePlaceholders : [] })
-      : { model, state: parsedState.value, questions: questionsFromDrafts(drafts), ...(images.length ? { images: imagePlaceholders } : {}) };
+      ? toDecisionsRequest(MODELS[model].id, previewBody)
+      : provider === "typesafe"
+        ? toSystemOneRequest(MODELS[model].id, previewBody, () => `img-<uuid ${++refN}>`)
+        : { model, state: previewBody.state, questions: previewBody.questions, ...(images.length ? { images: imagePlaceholders } : {}) };
 
   return (
     <div className="app">
@@ -536,7 +610,11 @@ function App() {
         <span className="spacer" />
         {!configured && (
           <span className="warn">
-            {provider === "openai" ? "Set OPENAI_API_KEY in .env" : "Set CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN in .env"}
+            {provider === "openai"
+              ? "Set OPENAI_API_KEY in .env"
+              : provider === "typesafe"
+                ? "Set TYPESAFE_API_KEY in .env"
+                : "Set CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN in .env"}
           </span>
         )}
         <button className="primary" disabled={!canRun} onClick={run} title="⌘↵">
@@ -797,7 +875,7 @@ function App() {
               {result && !showRaw && (
                 <div className="alist">
                   {Object.entries(result.answers).map(([id, a]) => (
-                    <AnswerCard key={id} id={id} a={a} q={responseQuestions[id]} />
+                    <AnswerCard key={id} id={id} a={a} q={responseQuestions[id]} images={responseImages} />
                   ))}
                 </div>
               )}
